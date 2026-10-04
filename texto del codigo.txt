@@ -1,0 +1,1276 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+
+import '../db/database_helper.dart';
+import '../utils/formatters.dart';
+
+class PantallaAlmacen extends StatefulWidget {
+  final Map<String, dynamic> empresaActiva;
+
+  const PantallaAlmacen({super.key, required this.empresaActiva});
+
+  @override
+  State<PantallaAlmacen> createState() => _PantallaAlmacenState();
+}
+
+class _PantallaAlmacenState extends State<PantallaAlmacen> {
+  List<Map<String, dynamic>> _productos = [];
+
+  final _nombreController = TextEditingController();
+  final _descripcionController = TextEditingController();
+  final _cantidadController = TextEditingController();
+  final _precioCompraController = TextEditingController();
+  final _precioVentaController = TextEditingController();
+  final _searchController = TextEditingController();
+
+  String _searchQuery = '';
+  bool _cargando = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _cargarProductos();
+
+    _searchController.addListener(() {
+      if (!mounted) return;
+
+      setState(() {
+        _searchQuery = _searchController.text.toLowerCase().trim();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _nombreController.dispose();
+    _descripcionController.dispose();
+    _cantidadController.dispose();
+    _precioCompraController.dispose();
+    _precioVentaController.dispose();
+    _searchController.dispose();
+
+    super.dispose();
+  }
+
+  int? _obtenerEmpresaId() {
+    final valor = widget.empresaActiva['id'];
+    if (valor is int) return valor;
+    if (valor is num) return valor.toInt();
+    return int.tryParse(valor?.toString() ?? '');
+  }
+
+  int _obtenerEnteroPrecio(dynamic valor) {
+    if (valor is num) {
+      return valor.toInt();
+    }
+
+    if (valor is String) {
+      return parseCurrencyInputToInteger(valor);
+    }
+
+    return 0;
+  }
+
+  // ============================================================
+  // CARGAR PRODUCTOS
+  // ============================================================
+
+  Future<void> _cargarProductos() async {
+    if (_cargando) return;
+
+    setState(() {
+      _cargando = true;
+    });
+
+    try {
+      final empresaId = _obtenerEmpresaId();
+
+      if (empresaId == null) {
+        if (mounted) {
+          setState(() {
+            _productos = [];
+          });
+        }
+
+        return;
+      }
+
+      // IMPORTANTE:
+      // Ahora SQLite filtra directamente por empresa.
+      // Ya no cargamos todos los productos para filtrarlos en memoria.
+      final datos = await DatabaseHelper.instance.obtenerProductos(
+        empresaId: empresaId,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _productos = datos;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error cargando productos: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _cargando = false;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // QR
+  // ============================================================
+
+  void _mostrarQR(Map<String, dynamic> producto) {
+    final datosJSON = jsonEncode({
+      'id': producto['id'],
+      'nombre': producto['nombre'],
+      'descripcion': producto['descripcion'] ?? '',
+      'precio_venta': producto['precio_venta'],
+    });
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text(
+            'QR - ${producto['nombre']}',
+            textAlign: TextAlign.center,
+          ),
+          content: SizedBox(
+            width: 250,
+            height: 250,
+            child: Center(child: QrImageView(data: datosJSON, size: 200)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _abrirEscaner() async {
+    final qrEscaneado = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const EscanerQRScreen()),
+    );
+
+    if (qrEscaneado == null || !mounted) {
+      return;
+    }
+
+    try {
+      final datos = jsonDecode(qrEscaneado);
+
+      if (datos is Map<String, dynamic>) {
+        _mostrarInfoProductoEscaneado(datos);
+      }
+    } catch (_) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('QR no válido.')));
+    }
+  }
+
+  void _mostrarInfoProductoEscaneado(Map<String, dynamic> producto) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text(
+            'Información del producto',
+            textAlign: TextAlign.center,
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.inventory_2_rounded,
+                size: 70,
+                color: Colors.indigo,
+              ),
+              const SizedBox(height: 15),
+
+              ListTile(
+                leading: const Icon(Icons.sell, color: Colors.indigo),
+                title: const Text(
+                  'Nombre',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+                subtitle: Text(
+                  producto['nombre']?.toString() ?? 'Sin nombre',
+                  style: const TextStyle(fontSize: 18),
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.monetization_on, color: Colors.green),
+                title: const Text(
+                  'Precio',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+                subtitle: Text(
+                  '\$${formatCurrencyCol(_obtenerEnteroPrecio(producto['precio_venta']))}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    color: Colors.green,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Aceptar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // GUARDAR PRODUCTO
+  // ============================================================
+
+  Future<void> _guardarProducto() async {
+    final nombre = _nombreController.text.trim();
+    final cantidad = int.tryParse(_cantidadController.text.trim()) ?? 0;
+
+    if (nombre.isEmpty || cantidad <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nombre y cantidad son obligatorios.')),
+      );
+
+      return;
+    }
+
+    try {
+      await DatabaseHelper.instance.insertarProducto({
+        'empresa_id': _obtenerEmpresaId(),
+        'nombre': nombre,
+        'descripcion': _descripcionController.text.trim(),
+        'cantidad': cantidad,
+        'precio_compra': parseCurrencyInputToInteger(
+          _precioCompraController.text,
+        ),
+        'precio_venta': parseCurrencyInputToInteger(
+          _precioVentaController.text,
+        ),
+
+        // Se conserva la columna para compatibilidad
+        // con bases antiguas, pero NO se utilizan fotos.
+        'ruta_foto': '',
+      });
+
+      _limpiarFormulario();
+
+      if (!mounted) return;
+
+      Navigator.pop(context);
+
+      await _cargarProductos();
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('¡Producto guardado!')));
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error guardando producto: $e')));
+    }
+  }
+
+  void _limpiarFormulario() {
+    _nombreController.clear();
+    _descripcionController.clear();
+    _cantidadController.clear();
+    _precioCompraController.clear();
+    _precioVentaController.clear();
+  }
+
+  // ============================================================
+  // CAMPOS
+  // ============================================================
+
+  Widget _crearCampo(
+    TextEditingController controller,
+    String label, {
+    bool isNum = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+        keyboardType: isNum ? TextInputType.number : TextInputType.text,
+      ),
+    );
+  }
+
+  // ============================================================
+  // EDITAR PRODUCTO
+  // ============================================================
+
+  Future<void> _editarProducto(Map<String, dynamic> producto) async {
+    final nCtrl = TextEditingController(
+      text: producto['nombre']?.toString() ?? '',
+    );
+
+    final dCtrl = TextEditingController(
+      text: producto['descripcion']?.toString() ?? '',
+    );
+
+    final cCtrl = TextEditingController(
+      text: producto['cantidad']?.toString() ?? '0',
+    );
+
+    final pcCtrl = TextEditingController(
+      text: formatCurrencyCol(_obtenerEnteroPrecio(producto['precio_compra'])),
+    );
+
+    final pvCtrl = TextEditingController(
+      text: formatCurrencyCol(_obtenerEnteroPrecio(producto['precio_venta'])),
+    );
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            top: 20,
+            left: 20,
+            right: 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // ==================================================
+                // ICONO DEL PRODUCTO
+                // ==================================================
+                const Icon(
+                  Icons.inventory_2_rounded,
+                  size: 65,
+                  color: Colors.indigo,
+                ),
+
+                const SizedBox(height: 5),
+
+                const Text(
+                  'Editar producto',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+
+                const SizedBox(height: 10),
+
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () => _mostrarQR(producto),
+                    icon: const Icon(Icons.qr_code, color: Colors.indigo),
+                    label: const Text(
+                      'Generar QR',
+                      style: TextStyle(color: Colors.indigo),
+                    ),
+                  ),
+                ),
+
+                _crearCampo(nCtrl, 'Nombre'),
+
+                _crearCampo(dCtrl, 'Descripción'),
+
+                _crearCampo(cCtrl, 'Cantidad', isNum: true),
+
+                _crearCampo(pcCtrl, 'Precio de compra', isNum: true),
+
+                _crearCampo(pvCtrl, 'Precio de venta', isNum: true),
+
+                const SizedBox(height: 10),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      if (nCtrl.text.trim().isEmpty) {
+                        return;
+                      }
+
+                      try {
+                        await DatabaseHelper.instance.actualizarProducto(
+                          int.parse(producto['id'].toString()),
+                          {
+                            'nombre': nCtrl.text.trim(),
+                            'descripcion': dCtrl.text.trim(),
+                            'cantidad': int.tryParse(cCtrl.text.trim()) ?? 0,
+                            'precio_compra': parseCurrencyInputToInteger(
+                              pcCtrl.text,
+                            ),
+                            'precio_venta': parseCurrencyInputToInteger(
+                              pvCtrl.text,
+                            ),
+
+                            // No utilizamos fotos.
+                            'ruta_foto': '',
+                            'empresa_id': _obtenerEmpresaId(),
+                          },
+                          empresaId: _obtenerEmpresaId(),
+                        );
+
+                        if (!mounted) return;
+
+                        Navigator.pop(ctx);
+
+                        await _cargarProductos();
+                      } catch (e) {
+                        if (!mounted) return;
+
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Error actualizando: $e')),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.save),
+                    label: const Text('Guardar cambios'),
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    nCtrl.dispose();
+    dCtrl.dispose();
+    cCtrl.dispose();
+    pcCtrl.dispose();
+    pvCtrl.dispose();
+  }
+
+  // ============================================================
+  // OPCIONES PARA AGREGAR
+  // ============================================================
+
+  void _mostrarFormularioOpciones() {
+    _limpiarFormulario();
+
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.add_circle, color: Colors.indigo),
+                title: const Text('Agregar producto manual'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _mostrarFormularioManual();
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.library_add, color: Colors.blue),
+                title: const Text('Ingresar múltiples productos'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _abrirIngresoMultiple();
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.local_shipping, color: Colors.orange),
+                title: const Text('Reabastecer stock'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _mostrarComprarProveedor();
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // INGRESO MULTIPLE
+  // ============================================================
+
+  Future<void> _abrirIngresoMultiple() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            IngresoMultipleScreen(empresaActiva: widget.empresaActiva),
+      ),
+    );
+
+    if (result == true && mounted) {
+      await _cargarProductos();
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Lote guardado correctamente.')),
+      );
+    }
+  }
+
+  void _mostrarFormularioManual() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            top: 20,
+            left: 20,
+            right: 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.inventory_2_rounded,
+                  size: 65,
+                  color: Colors.indigo,
+                ),
+
+                const SizedBox(height: 5),
+
+                const Text(
+                  'Nuevo producto',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+
+                const SizedBox(height: 15),
+
+                _crearCampo(_nombreController, 'Nombre'),
+
+                _crearCampo(_descripcionController, 'Descripción'),
+
+                _crearCampo(_cantidadController, 'Cantidad', isNum: true),
+
+                _crearCampo(
+                  _precioCompraController,
+                  'Precio de compra',
+                  isNum: true,
+                ),
+
+                _crearCampo(
+                  _precioVentaController,
+                  'Precio de venta',
+                  isNum: true,
+                ),
+
+                const SizedBox(height: 10),
+
+                // NO FOTO
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(
+                        Icons.image_not_supported_outlined,
+                        color: Colors.grey,
+                      ),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Las fotos están desactivadas para mejorar el rendimiento.',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _guardarProducto,
+                    icon: const Icon(Icons.save),
+                    label: const Text('Guardar producto'),
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ============================================================
+  // REABASTECER
+  // ============================================================
+
+  Future<void> _mostrarComprarProveedor() async {
+    if (_productos.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No hay productos para reabastecer.')),
+      );
+
+      return;
+    }
+
+    int? prodId = _productos.first['id'];
+
+    final cantCtrl = TextEditingController();
+
+    final pcCtrl = TextEditingController(
+      text: formatCurrencyCol(
+        _obtenerEnteroPrecio(_productos.first['precio_compra']),
+      ),
+    );
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (stCtx, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                top: 20,
+                left: 20,
+                right: 20,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.local_shipping,
+                      size: 55,
+                      color: Colors.orange,
+                    ),
+
+                    const SizedBox(height: 5),
+
+                    const Text(
+                      'Reabastecer stock',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+
+                    const SizedBox(height: 15),
+
+                    DropdownButtonFormField<int>(
+                      initialValue: prodId,
+                      decoration: const InputDecoration(
+                        labelText: 'Producto',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: _productos.map((p) {
+                        return DropdownMenuItem<int>(
+                          value: p['id'],
+                          child: Text(
+                            p['nombre']?.toString() ?? '',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        setModalState(() {
+                          prodId = val;
+
+                          if (val != null) {
+                            final p = _productos.firstWhere(
+                              (e) => e['id'] == val,
+                            );
+
+                            pcCtrl.text = formatCurrencyCol(
+                              _obtenerEnteroPrecio(p['precio_compra']),
+                            );
+                          }
+                        });
+                      },
+                    ),
+
+                    const SizedBox(height: 10),
+
+                    _crearCampo(cantCtrl, 'Cantidad a sumar', isNum: true),
+
+                    _crearCampo(pcCtrl, 'Precio de compra', isNum: true),
+
+                    const SizedBox(height: 15),
+
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () async {
+                          final sumar = int.tryParse(cantCtrl.text.trim()) ?? 0;
+
+                          if (sumar <= 0 || prodId == null) {
+                            return;
+                          }
+
+                          final p = _productos.firstWhere(
+                            (e) => e['id'] == prodId,
+                          );
+
+                          final stock =
+                              int.tryParse(p['cantidad']?.toString() ?? '0') ??
+                              0;
+
+                          await DatabaseHelper.instance.actualizarProducto(
+                            int.parse(p['id'].toString()),
+                            {
+                              'nombre': p['nombre'],
+                              'descripcion': p['descripcion'] ?? '',
+                              'cantidad': stock + sumar,
+                              'precio_compra': parseCurrencyInputToInteger(
+                                pcCtrl.text,
+                              ),
+                              'precio_venta': p['precio_venta'],
+
+                              // Sin fotografías.
+                              'ruta_foto': '',
+                              'empresa_id': _obtenerEmpresaId(),
+                            },
+                            empresaId: _obtenerEmpresaId(),
+                          );
+
+                          if (!mounted) return;
+
+                          Navigator.pop(ctx);
+
+                          await _cargarProductos();
+                        },
+                        icon: const Icon(Icons.add_box),
+                        label: const Text('Registrar compra'),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    cantCtrl.dispose();
+    pcCtrl.dispose();
+  }
+
+  // ============================================================
+  // ICONO DEL PRODUCTO
+  // ============================================================
+
+  Widget _iconoProducto(Map<String, dynamic> producto) {
+    final cantidad = int.tryParse(producto['cantidad']?.toString() ?? '0') ?? 0;
+
+    Color color;
+
+    if (cantidad <= 0) {
+      color = Colors.red;
+    } else if (cantidad <= 5) {
+      color = Colors.orange;
+    } else {
+      color = Colors.indigo;
+    }
+
+    return Container(
+      width: 52,
+      height: 52,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(Icons.inventory_2_rounded, color: color, size: 30),
+    );
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
+
+  @override
+  Widget build(BuildContext context) {
+    final filtrados = _productos.where((p) {
+      final nombre = p['nombre']?.toString().toLowerCase() ?? '';
+
+      final descripcion = p['descripcion']?.toString().toLowerCase() ?? '';
+
+      return nombre.contains(_searchQuery) ||
+          descripcion.contains(_searchQuery);
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Inventario - ${widget.empresaActiva['nombre'] ?? ''}'),
+        actions: [
+          IconButton(
+            tooltip: 'Escanear QR',
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: _abrirEscaner,
+          ),
+
+          IconButton(
+            tooltip: 'Actualizar',
+            icon: const Icon(Icons.refresh),
+            onPressed: _cargarProductos,
+          ),
+        ],
+      ),
+
+      body: Column(
+        children: [
+          // ======================================================
+          // BUSCADOR
+          // ======================================================
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                labelText: 'Buscar producto...',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _searchController.clear();
+                        },
+                      )
+                    : null,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+
+          // ======================================================
+          // LISTA
+          // ======================================================
+          Expanded(
+            child: _cargando
+                ? const Center(child: CircularProgressIndicator())
+                : filtrados.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.inventory_2_outlined,
+                          size: 70,
+                          color: Colors.grey,
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          _searchQuery.isEmpty
+                              ? 'Sin productos'
+                              : 'No se encontraron productos',
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    physics: const BouncingScrollPhysics(),
+                    itemCount: filtrados.length,
+                    itemBuilder: (ctx, i) {
+                      final p = filtrados[i];
+
+                      final cant =
+                          int.tryParse(p['cantidad']?.toString() ?? '0') ?? 0;
+
+                      final agotado = cant <= 0;
+
+                      final precio = _obtenerEnteroPrecio(p['precio_venta']);
+
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        child: ListTile(
+                          onTap: () => _editarProducto(p),
+
+                          // =================================================
+                          // YA NO SE CARGA NINGUNA IMAGEN
+                          // =================================================
+                          leading: _iconoProducto(p),
+
+                          title: Text(
+                            p['nombre']?.toString() ?? '',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+
+                          subtitle: Text(
+                            'Stock: $cant  •  \$${formatCurrencyCol(precio)}',
+                          ),
+
+                          trailing: Icon(
+                            agotado
+                                ? Icons.warning_amber_rounded
+                                : Icons.check_circle,
+                            color: agotado ? Colors.red : Colors.green,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+
+      floatingActionButton: FloatingActionButton(
+        onPressed: _mostrarFormularioOpciones,
+        tooltip: 'Agregar producto',
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+// =====================================================================
+// INGRESO MÚLTIPLE
+// =====================================================================
+
+class _ControladoresProductoLote {
+  final nombreController = TextEditingController();
+
+  final cantidadController = TextEditingController();
+
+  final precioCompraController = TextEditingController();
+
+  final precioVentaController = TextEditingController();
+
+  void dispose() {
+    nombreController.dispose();
+    cantidadController.dispose();
+    precioCompraController.dispose();
+    precioVentaController.dispose();
+  }
+}
+
+class IngresoMultipleScreen extends StatefulWidget {
+  final Map<String, dynamic>? empresaActiva;
+
+  const IngresoMultipleScreen({super.key, this.empresaActiva});
+
+  @override
+  State<IngresoMultipleScreen> createState() => _IngresoMultipleScreenState();
+}
+
+class _IngresoMultipleScreenState extends State<IngresoMultipleScreen> {
+  final _proveedorController = TextEditingController();
+
+  final List<_ControladoresProductoLote> _lotes = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _agregarFila();
+  }
+
+  @override
+  void dispose() {
+    _proveedorController.dispose();
+
+    for (final c in _lotes) {
+      c.dispose();
+    }
+
+    super.dispose();
+  }
+
+  void _agregarFila() {
+    setState(() {
+      _lotes.add(_ControladoresProductoLote());
+    });
+  }
+
+  void _eliminarFila(int index) {
+    if (_lotes.length <= 1) {
+      return;
+    }
+
+    setState(() {
+      _lotes[index].dispose();
+      _lotes.removeAt(index);
+    });
+  }
+
+  Future<void> _guardarTodos() async {
+    int guardados = 0;
+
+    final proveedor = _proveedorController.text.trim();
+
+    try {
+      for (final c in _lotes) {
+        final nombre = c.nombreController.text.trim();
+
+        final cantidad = int.tryParse(c.cantidadController.text.trim()) ?? 0;
+
+        if (nombre.isEmpty || cantidad <= 0) {
+          continue;
+        }
+
+        await DatabaseHelper.instance.insertarProducto({
+          'empresa_id': int.tryParse(
+            widget.empresaActiva?['id']?.toString() ?? '',
+          ),
+          'nombre': nombre,
+          'descripcion': proveedor.isNotEmpty ? 'Proveedor: $proveedor' : '',
+          'cantidad': cantidad,
+          'precio_compra': parseCurrencyInputToInteger(
+            c.precioCompraController.text,
+          ),
+          'precio_venta': parseCurrencyInputToInteger(
+            c.precioVentaController.text,
+          ),
+
+          // Siempre vacío.
+          'ruta_foto': '',
+        });
+
+        guardados++;
+      }
+
+      if (!mounted) return;
+
+      if (guardados > 0) {
+        Navigator.pop(context, true);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No hay productos válidos para guardar.'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error guardando lote: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Ingreso múltiple'),
+        actions: [
+          IconButton(icon: const Icon(Icons.save), onPressed: _guardarTodos),
+        ],
+      ),
+
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              controller: _proveedorController,
+              decoration: const InputDecoration(
+                labelText: 'Proveedor general',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+
+          Expanded(
+            child: ListView.builder(
+              itemCount: _lotes.length,
+              itemBuilder: (ctx, i) {
+                final c = _lotes[i];
+
+                return Card(
+                  margin: const EdgeInsets.all(10),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Producto #${i + 1}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () => _eliminarFila(i),
+                            ),
+                          ],
+                        ),
+
+                        TextField(
+                          controller: c.nombreController,
+                          decoration: const InputDecoration(
+                            labelText: 'Nombre',
+                          ),
+                        ),
+
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: c.cantidadController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Cantidad',
+                                ),
+                                keyboardType: TextInputType.number,
+                              ),
+                            ),
+
+                            const SizedBox(width: 10),
+
+                            Expanded(
+                              child: TextField(
+                                controller: c.precioCompraController,
+                                decoration: const InputDecoration(
+                                  labelText: 'P. Compra',
+                                ),
+                                keyboardType: TextInputType.number,
+                              ),
+                            ),
+
+                            const SizedBox(width: 10),
+
+                            Expanded(
+                              child: TextField(
+                                controller: c.precioVentaController,
+                                decoration: const InputDecoration(
+                                  labelText: 'P. Venta',
+                                ),
+                                keyboardType: TextInputType.number,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _agregarFila,
+        icon: const Icon(Icons.add),
+        label: const Text('Agregar otro'),
+      ),
+    );
+  }
+}
+
+// =====================================================================
+// ESCÁNER QR
+// =====================================================================
+
+class EscanerQRScreen extends StatefulWidget {
+  const EscanerQRScreen({super.key});
+
+  @override
+  State<EscanerQRScreen> createState() => _EscanerQRScreenState();
+}
+
+class _EscanerQRScreenState extends State<EscanerQRScreen> {
+  final MobileScannerController cameraController = MobileScannerController();
+
+  bool isScanned = false;
+
+  @override
+  void dispose() {
+    cameraController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Escanear QR'),
+        actions: [
+          IconButton(
+            icon: ValueListenableBuilder(
+              valueListenable: cameraController.torchState,
+              builder: (ctx, state, child) {
+                return Icon(
+                  state == TorchState.on ? Icons.flash_on : Icons.flash_off,
+                );
+              },
+            ),
+            onPressed: () => cameraController.toggleTorch(),
+          ),
+        ],
+      ),
+
+      body: MobileScanner(
+        controller: cameraController,
+        onDetect: (capture) {
+          if (capture.barcodes.isEmpty || isScanned) {
+            return;
+          }
+
+          final codigo = capture.barcodes.first.rawValue;
+
+          if (codigo == null || codigo.isEmpty) {
+            return;
+          }
+
+          isScanned = true;
+
+          Navigator.pop(context, codigo);
+        },
+      ),
+    );
+  }
+}
